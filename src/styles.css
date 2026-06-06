@@ -99,3 +99,12 @@
     linear-gradient(90deg, oklch(1 0 0 / 0.04) 1px, transparent 1px);
   background-size: 32px 32px;
 }
+.amg-frame {
+  background: linear-gradient(180deg, oklch(0.15 0.012 240), oklch(0.1 0.01 240));
+  border: 1px solid oklch(1 0 0 / 0.08);
+  box-shadow: 0 40px 100px -40px oklch(0 0 0 / 0.8), inset 0 1px 0 oklch(1 0 0 / 0.06);
+}
+@keyframes eq {
+  0% { transform: scaleY(0.4); }
+  100% { transform: scaleY(1.4); }
+}
