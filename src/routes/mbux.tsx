@@ -219,7 +219,7 @@ function ScreenContent({
   setInput: (v: string) => void;
   send: (q: string) => void;
   startVoice: () => void;
-  scrollRef: React.RefObject<HTMLDivElement>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
     <div className="flex h-full w-full flex-col p-[0.6%] text-[clamp(7px,0.6vw,11px)]" style={{ fontFamily: "system-ui" }}>
