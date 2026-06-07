@@ -1,10 +1,10 @@
-import { createFileRoute, Link, useSearch } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { Button } from "@/components/ui/button";
 import { useVehicleStore, SERVICE_CENTERS, type ServiceCenter, type ServiceRequest } from "@/lib/vehicle-store";
 
-type Search = { center?: ServiceCenter };
+type Search = { center: ServiceCenter };
 
 export const Route = createFileRoute("/service")({
   head: () => ({ meta: [{ title: "Service Portal" }] }),
@@ -17,9 +17,9 @@ export const Route = createFileRoute("/service")({
 });
 
 function ServicePortal() {
-  const { center = "Whitefield" } = useSearch({ from: "/service" });
+  const { center } = Route.useSearch();
   const { requests, centersInventory, respondRequest } = useVehicleStore();
-  const inventory = centersInventory[center] ?? {};
+  const inventory = (centersInventory[center] ?? {}) as Record<string, number>;
   const scoped = requests.filter((r) => r.center === center);
   const pending = scoped.filter((r) => r.status === "pending");
   const handled = scoped.filter((r) => r.status === "responded");
