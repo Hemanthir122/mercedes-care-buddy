@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { askMercedes } from "@/lib/ai-chat.functions";
 import cockpitAsset from "@/assets/cockpit.png.asset.json";
+import cockpitLocal from "@/assets/cockpit.png";
 import {
   useVehicleStore,
   SERVICE_CENTERS,
@@ -254,8 +255,9 @@ function Cockpit() {
   }
 
   return (
-    <div className="relative mx-auto w-full overflow-hidden rounded-2xl bg-black shadow-2xl" style={{ aspectRatio: "1660 / 933" }}>
-      <img src={cockpitAsset.url} alt="Mercedes cockpit" className="absolute inset-0 h-full w-full object-cover" draggable={false} />
+    // Fullscreen cockpit container — uses local `src/assets/cockpit.png` when available.
+    <div className="relative w-screen h-screen overflow-hidden bg-black shadow-2xl" style={{ borderRadius: 0 }}>
+      <img src={cockpitLocal || cockpitAsset.url} alt="Mercedes cockpit" className="absolute inset-0 h-full w-full object-cover" draggable={false} />
 
       <div
         className="absolute overflow-hidden bg-[oklch(0.08_0.02_240)] ring-1 ring-mb-cyan/20"
