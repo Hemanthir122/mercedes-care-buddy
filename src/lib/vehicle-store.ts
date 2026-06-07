@@ -30,6 +30,41 @@ export type Warning = {
 export type ServiceCenter = "Whitefield" | "JP Nagar";
 export const SERVICE_CENTERS: ServiceCenter[] = ["Whitefield", "JP Nagar"];
 
+export type VisitSlot = { day: string; time: string; label: string };
+
+export const CENTER_META: Record<ServiceCenter, { address: string; phone: string; slots: VisitSlot[] }> = {
+  Whitefield: {
+    address: "No. 12, ITPL Main Rd, Whitefield, Bangalore",
+    phone: "+91-80-4567-1234",
+    slots: [
+      { day: "Today",     time: "11:00 AM", label: "Today 11:00 AM" },
+      { day: "Today",     time: "3:00 PM",  label: "Today 3:00 PM" },
+      { day: "Tomorrow",  time: "9:30 AM",  label: "Tomorrow 9:30 AM" },
+      { day: "Tomorrow",  time: "2:00 PM",  label: "Tomorrow 2:00 PM" },
+    ],
+  },
+  "JP Nagar": {
+    address: "15, 7th Phase, JP Nagar, Bangalore",
+    phone: "+91-80-2678-9900",
+    slots: [
+      { day: "Today",    time: "1:00 PM",  label: "Today 1:00 PM" },
+      { day: "Tomorrow", time: "10:00 AM", label: "Tomorrow 10:00 AM" },
+      { day: "Tomorrow", time: "4:00 PM",  label: "Tomorrow 4:00 PM" },
+      { day: "Day after",time: "9:00 AM",  label: "Day after 9:00 AM" },
+    ],
+  },
+};
+
+export type VisitRequest = {
+  id: string;
+  center: ServiceCenter;
+  customer: string;
+  vehicle: string;
+  slot: VisitSlot;
+  status: "pending" | "confirmed" | "declined";
+  confirmedAt?: number;
+};
+
 export type ServiceRequest = {
   id: string;
   groupId: string;
@@ -62,6 +97,7 @@ export type VehicleState = {
   health: Record<HealthKey, number>;
   warnings: Warning[];
   requests: ServiceRequest[];
+  visitRequests: VisitRequest[];
   centersInventory: Record<ServiceCenter, Record<string, number>>;
   setHealth: (k: HealthKey, v: number) => void;
   triggerWarning: (code: WarningCode) => void;
@@ -74,7 +110,9 @@ export type VehicleState = {
     health: number;
     predictedFailureDays: number;
     centers: ServiceCenter[];
-  }) => string; // returns groupId
+  }) => string;
+  requestVisit: (center: ServiceCenter, slot: VisitSlot) => string; // returns visitRequest id
+  respondVisit: (id: string, status: "confirmed" | "declined") => void;
   respondRequest: (id: string, r: ServiceRequest["response"]) => void;
   reset: () => void;
 };
@@ -108,7 +146,7 @@ export const COMPONENT_META: Record<HealthKey, { issue: string; part: string; wa
 
 const CHANNEL = "mbux-state";
 
-const initial: Omit<VehicleState, "setHealth" | "triggerWarning" | "clearWarning" | "clearAllWarnings" | "requestService" | "respondRequest" | "reset"> = {
+const initial: Omit<VehicleState, "setHealth" | "triggerWarning" | "clearWarning" | "clearAllWarnings" | "requestService" | "requestVisit" | "respondVisit" | "respondRequest" | "reset"> = {
   vehicleId: "MB001",
   model: "GLC 300",
   customer: "Mr. Sharma",
@@ -116,6 +154,7 @@ const initial: Omit<VehicleState, "setHealth" | "triggerWarning" | "clearWarning
   health: { battery: 95, brakes: 82, wipers: 65, ac: 91, tires: 88, engine: 96 },
   warnings: [],
   requests: [],
+  visitRequests: [],
   centersInventory: {
     Whitefield: { "Brake Pads": 12, "Battery": 8, "Wiper Motor": 4, "AC Compressor": 3, "Tire": 20, "Coolant": 15 },
     "JP Nagar": { "Brake Pads": 6, "Battery": 14, "Wiper Motor": 9, "AC Compressor": 1, "Tire": 12, "Coolant": 22 },
@@ -181,6 +220,36 @@ export const useVehicleStore = create<VehicleState>((set, get) => ({
     }));
     persist(get());
   },
+  requestVisit: (center, slot) => {
+    const s = get();
+    const id = crypto.randomUUID();
+    const vr: VisitRequest = {
+      id,
+      center,
+      customer: s.customer,
+      vehicle: `${s.model} · ${s.vehicleId}`,
+      slot,
+      status: "pending",
+    };
+    set((st) => ({ visitRequests: [vr, ...st.visitRequests] }));
+    persist(get());
+    // Simulate center agent confirming after 1.5s
+    setTimeout(() => {
+      set((st) => ({
+        visitRequests: st.visitRequests.map((v) =>
+          v.id === id ? { ...v, status: "confirmed", confirmedAt: Date.now() } : v
+        ),
+      }));
+      persist(useVehicleStore.getState());
+    }, 1500);
+    return id;
+  },
+  respondVisit: (id, status) => {
+    set((s) => ({
+      visitRequests: s.visitRequests.map((v) => (v.id === id ? { ...v, status } : v)),
+    }));
+    persist(get());
+  },
   reset: () => {
     set(initial);
     persist(get());
@@ -218,6 +287,7 @@ function persist(state: VehicleState) {
     health: state.health,
     warnings: state.warnings,
     requests: state.requests,
+    visitRequests: state.visitRequests,
     centersInventory: state.centersInventory,
   };
   try {

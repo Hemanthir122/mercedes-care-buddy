@@ -8,10 +8,13 @@ import cockpitLocal from "@/assets/cockpit.png";
 import {
   useVehicleStore,
   SERVICE_CENTERS,
+  CENTER_META,
   COMPONENT_META,
   type Severity,
   type HealthKey,
   type ServiceRequest,
+  type ServiceCenter,
+  type VisitSlot,
 } from "@/lib/vehicle-store";
 
 export const Route = createFileRoute("/mbux")({
@@ -22,7 +25,10 @@ export const Route = createFileRoute("/mbux")({
 type Msg =
   | { kind: "text"; role: "user" | "assistant"; text: string }
   | { kind: "prompt"; id: string; componentKey: HealthKey; text: string; resolved?: "yes" | "no" }
-  | { kind: "responses"; groupId: string; componentKey: HealthKey };
+  | { kind: "responses"; groupId: string; componentKey: HealthKey; navigating?: boolean }
+  | { kind: "agent-chat"; center: ServiceCenter; groupId: string }
+  | { kind: "visit-slots" }
+  | { kind: "notification-gate" };
 
 function Mbux() {
   const [started, setStarted] = useState(false);
@@ -91,12 +97,22 @@ const sevColor: Record<Severity, string> = {
 };
 
 function Cockpit() {
-  const { health, warnings, model, location, requests, requestService } = useVehicleStore();
+  const { health, warnings, model, location, requests, requestService, centersInventory, visitRequests, requestVisit } = useVehicleStore();
   const ask = useServerFn(askMercedes);
 
-  const [messages, setMessages] = useState<Msg[]>([
-    { kind: "text", role: "assistant", text: `Welcome. Your ${model} is ready. Tap mic or say "Hey Mercedes".` },
-  ]);
+  const hasNotification = warnings.length > 0 || Object.values(health).some((v) => v < 30);
+
+  const [messages, setMessages] = useState<Msg[]>(() =>
+    hasNotification
+      ? [
+          { kind: "text", role: "assistant", text: "Hi Hemanth, welcome back! You have a notification." },
+          { kind: "notification-gate" },
+        ]
+      : [
+          { kind: "text", role: "assistant", text: "Hi Hemanth, welcome back! Your car is all good." },
+        ]
+  );
+  const [notificationsRevealed, setNotificationsRevealed] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
@@ -116,18 +132,29 @@ function Cockpit() {
     return () => clearInterval(id);
   }, []);
 
+  // Speak welcome on first mount — only mention notification if there's actually something
+  useEffect(() => {
+    const { health: h, warnings: w } = useVehicleStore.getState();
+    const hasIssue = w.length > 0 || Object.values(h).some((v) => v < 30);
+    const t1 = setTimeout(() => speak("Welcome back, Hemanth!"), 800);
+    const t2 = hasIssue
+      ? setTimeout(() => speak("You have a notification."), 2200)
+      : null;
+    return () => { clearTimeout(t1); if (t2) clearTimeout(t2); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  // Threshold watcher: <20% auto-send both centers, <30% prompt customer
+  // Threshold watcher: <20% critical — fires always; <30% soft — only after reveal
   useEffect(() => {
     const keys = Object.keys(health) as HealthKey[];
     for (const k of keys) {
       const v = health[k];
       const state = (notifyState.current[k] ||= {});
       if (v >= 30) {
-        // Reset when recovered above prompt threshold
         state.autoSent = false;
         state.promptShown = false;
         continue;
@@ -144,25 +171,120 @@ function Cockpit() {
           predictedFailureDays: Math.max(1, Math.round(v / 3)),
           centers: [...SERVICE_CENTERS],
         });
-        const sysText = `⚠ Critical: ${meta.issue} at ${v}%. I've automatically notified Mercedes ${SERVICE_CENTERS.join(" and ")} service centers.`;
+        const sysText = `Your ${meta.issue.toLowerCase()} needs urgent attention. I've already contacted both service centers for you — please don't ignore this.`;
         setMessages((m) => [
           ...m,
           { kind: "text", role: "assistant", text: sysText },
           { kind: "responses", groupId, componentKey: k },
         ]);
+        // Auto-open voice modal to announce the critical alert
+        setVoiceOpen(true);
+        setListening(false);
+        setHeard(sysText);
         speak(sysText);
-      } else if (v < 30 && !state.promptShown) {
+        setTimeout(() => setVoiceOpen(false), 4500);
+
+        // Auto-simulate service center responses so MBUX always gets a reply
+        const { requests: reqs, respondRequest, centersInventory: inv } = useVehicleStore.getState();
+        setTimeout(() => {
+          const group = useVehicleStore.getState().requests.filter((r) => r.groupId === groupId);
+          group.forEach((r, idx) => {
+            setTimeout(() => {
+              const qty = inv[r.center]?.[r.requiredPart] ?? 0;
+              const slotDays = idx === 0 ? 1 : 3;
+              const slot = slotDays === 1 ? "Tomorrow" : `In ${slotDays} days`;
+              respondRequest(r.id, {
+                available: qty > 0,
+                repairTime: "1 Hour",
+                slotDays,
+                slot,
+                center: r.center,
+              });
+            }, idx * 1200);
+          });
+        }, 2000);
+      } else if (v < 30 && !state.promptShown && notificationsRevealed) {
         state.promptShown = true;
-        const text = `Your ${meta.issue.toLowerCase()} is at ${v}%. Would you like me to connect you with a Mercedes service center?`;
-        setMessages((m) => [
-          ...m,
-          { kind: "prompt", id: crypto.randomUUID(), componentKey: k, text },
-        ]);
+        const text = `Heads up — your ${meta.issue.toLowerCase()} needs attention soon. Keep an eye on it.`;
+        setMessages((m) => [...m, { kind: "text", role: "assistant", text }]);
         speak(text);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health.battery, health.brakes, health.wipers, health.ac, health.tires, health.engine]);
+  }, [notificationsRevealed, health.battery, health.brakes, health.wipers, health.ac, health.tires, health.engine]);
+
+  function handleRevealNotifications() {
+    setNotificationsRevealed(true);
+    // Remove the gate card and let the health watcher fire naturally
+    setMessages((m) => m.filter((msg) => msg.kind !== "notification-gate"));
+  }
+
+  function handleNavigate(groupId: string, centerName: string) {
+    setMessages((m) =>
+      m.map((msg) =>
+        msg.kind === "responses" && msg.groupId === groupId ? { ...msg, navigating: true } : msg
+      )
+    );
+    const center = centerName as ServiceCenter;
+
+    // Find what part is needed for this group
+    const req = useVehicleStore.getState().requests.find((r) => r.groupId === groupId && r.center === center);
+    const requiredPart = req?.requiredPart ?? "";
+    const inventory = centersInventory[center];
+    const qty = requiredPart ? (inventory[requiredPart] ?? 0) : 0;
+
+    const partMsg = requiredPart
+      ? qty > 0
+        ? `Good news — Mercedes ${centerName} has your ${requiredPart} ready (${qty} in stock). Head over and they'll take care of it.`
+        : `Just a heads-up — Mercedes ${centerName} doesn't have your ${requiredPart} right now, but they can order it. Usually takes 1-2 days.`
+      : `Navigation to Mercedes ${centerName} started.`;
+
+    setMessages((prev) => [
+      ...prev,
+      { kind: "text", role: "assistant", text: partMsg },
+      { kind: "agent-chat", center, groupId },
+    ]);
+    speak(partMsg);
+  }
+
+  function handleAgentMessage(center: ServiceCenter, userMsg: string) {
+    if (!userMsg.trim()) return;
+    // Add user message
+    setMessages((m) => [...m, { kind: "text", role: "user", text: `[To ${center}] ${userMsg}` }]);
+
+    // Simulate center agent checking inventory and replying
+    setTimeout(() => {
+      const inventory = centersInventory[center];
+      const lowerMsg = userMsg.toLowerCase();
+
+      // Check if asking about a part
+      const partMatch = Object.keys(inventory).find((part) =>
+        lowerMsg.includes(part.toLowerCase())
+      );
+
+      let reply = "";
+      if (partMatch) {
+        const qty = inventory[partMatch];
+        if (qty > 0) {
+          reply = `Yes, we have ${partMatch} in stock (${qty} available). We can sort it out when you come in.`;
+        } else {
+          reply = `Sorry, ${partMatch} is out of stock right now. We can order it — usually takes 1-2 days.`;
+        }
+      } else if (lowerMsg.includes("time") || lowerMsg.includes("slot") || lowerMsg.includes("appointment")) {
+        reply = `We have slots available today and tomorrow. Come in anytime between 9am and 6pm.`;
+      } else if (lowerMsg.includes("cost") || lowerMsg.includes("price") || lowerMsg.includes("charge")) {
+        reply = `Pricing depends on the job. We'll give you a full estimate when you arrive, no surprises.`;
+      } else if (lowerMsg.includes("how long") || lowerMsg.includes("duration") || lowerMsg.includes("wait")) {
+        reply = `Most jobs take 1-3 hours. We'll give you an exact time once we look at the car.`;
+      } else {
+        reply = `Got your message. Please come in and we'll take care of it. Any other questions?`;
+      }
+
+      const fullReply = `Mercedes ${center}: ${reply}`;
+      setMessages((m) => [...m, { kind: "text", role: "assistant", text: fullReply }]);
+      speak(fullReply);
+    }, 800);
+  }
 
   function handlePromptAnswer(promptId: string, componentKey: HealthKey, answer: "yes" | "no") {
     setMessages((m) =>
@@ -196,10 +318,28 @@ function Cockpit() {
     speak(t);
   }
 
+  const VISIT_INTENT = /service cent|list cent|when.*free|available slot|book.*visit|visit.*center|show.*center|centers/i;
+
   async function send(question: string) {
     if (!question.trim() || loading) return;
     setMessages((m) => [...m, { kind: "text", role: "user", text: question }]);
     setInput("");
+
+    // Intercept visit / list centers intent — no AI needed
+    if (VISIT_INTENT.test(question)) {
+      const t = "Here are our service centers. Pick a slot and I'll notify them right away.";
+      setMessages((m) => [...m, { kind: "text", role: "assistant", text: t }, { kind: "visit-slots" }]);
+      speak(t);
+      return;
+    }
+
+    // Intercept "show notification" intent
+    const NOTIF_INTENT = /notif|what.*up|what.*wrong|show|tell me|any issue|any problem/i;
+    if (!notificationsRevealed && NOTIF_INTENT.test(question)) {
+      handleRevealNotifications();
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await ask({
@@ -216,6 +356,38 @@ function Cockpit() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleBookVisit(center: ServiceCenter, slot: VisitSlot) {
+    const { customer, model, vehicleId } = useVehicleStore.getState();
+    const id = requestVisit(center, slot);
+    const pending = `Booking ${slot.label} at Mercedes ${center}… waiting for their confirmation.`;
+    setMessages((m) => [...m, { kind: "text", role: "assistant", text: pending }]);
+    speak(pending);
+
+    // Watch for center confirmation
+    const unsub = useVehicleStore.subscribe((state) => {
+      const vr = state.visitRequests.find((v) => v.id === id);
+      if (vr?.status === "confirmed") {
+        unsub();
+
+        // 1. Tell the customer
+        const confirmedMsg = `Mercedes ${center} confirmed your visit for ${slot.label}. You're all set!`;
+        setMessages((m) => [...m, { kind: "text", role: "assistant", text: confirmedMsg }]);
+        speak(confirmedMsg);
+
+        // 2. Show what was sent to the center (outbound notification)
+        const sentToCenter = `[To Mercedes ${center}] ${customer} will visit on ${slot.label} with ${model} (${vehicleId}). Please keep the slot reserved.`;
+        setMessages((m) => [...m, { kind: "text", role: "user", text: sentToCenter }]);
+
+        // 3. Center agent replies back after a short delay
+        setTimeout(() => {
+          const centerReply = `Mercedes ${center}: Got it! Slot reserved for ${customer} on ${slot.label}. We'll have a service advisor ready. See you then!`;
+          setMessages((m) => [...m, { kind: "text", role: "assistant", text: centerReply }]);
+          speak(centerReply);
+        }, 1200);
+      }
+    });
   }
 
   function speak(text: string) {
@@ -268,6 +440,7 @@ function Cockpit() {
           warnings={warnings}
           messages={messages}
           requests={requests}
+          visitRequests={visitRequests}
           loading={loading}
           input={input}
           setInput={setInput}
@@ -275,6 +448,11 @@ function Cockpit() {
           startVoice={startVoice}
           scrollRef={scrollRef}
           onPromptAnswer={handlePromptAnswer}
+          onNavigate={handleNavigate}
+          speak={speak}
+          onAgentMessage={handleAgentMessage}
+          onBookVisit={handleBookVisit}
+          onRevealNotifications={handleRevealNotifications}
         />
       </div>
 
@@ -298,12 +476,13 @@ function Cockpit() {
 /* ─────────────────────────── Screen content ─────────────────────────── */
 
 function ScreenContent({
-  clock, warnings, messages, requests, loading, input, setInput, send, startVoice, scrollRef, onPromptAnswer,
+  clock, warnings, messages, requests, visitRequests, loading, input, setInput, send, startVoice, scrollRef, onPromptAnswer, onNavigate, speak, onAgentMessage, onBookVisit, onRevealNotifications,
 }: {
   clock: string;
   warnings: ReturnType<typeof useVehicleStore.getState>["warnings"];
   messages: Msg[];
   requests: ServiceRequest[];
+  visitRequests: ReturnType<typeof useVehicleStore.getState>["visitRequests"];
   loading: boolean;
   input: string;
   setInput: (v: string) => void;
@@ -311,6 +490,11 @@ function ScreenContent({
   startVoice: () => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   onPromptAnswer: (id: string, k: HealthKey, a: "yes" | "no") => void;
+  onNavigate: (groupId: string, centerName: string) => void;
+  speak: (text: string) => void;
+  onAgentMessage: (center: ServiceCenter, msg: string) => void;
+  onBookVisit: (center: ServiceCenter, slot: VisitSlot) => void;
+  onRevealNotifications: () => void;
 }) {
   return (
     <div className="flex h-full w-full flex-col p-[0.6%] text-[clamp(7px,0.6vw,11px)]" style={{ fontFamily: "system-ui" }}>
@@ -368,7 +552,32 @@ function ScreenContent({
             );
           }
           // responses
-          return <ResponsesBlock key={i} groupId={m.groupId} requests={requests} />;
+          if (m.kind === "responses") {
+            return <ResponsesBlock key={i} groupId={m.groupId} requests={requests} navigating={m.navigating} onNavigate={onNavigate} speak={speak} />;
+          }
+          // agent-chat — inline in correct position
+          if (m.kind === "agent-chat") {
+            return <AgentChatBlock key={i} center={m.center} onSend={onAgentMessage} />;
+          }
+          // visit slots
+          if (m.kind === "visit-slots") {
+            return <VisitSlotsBlock key={i} visitRequests={visitRequests} onBook={onBookVisit} />;
+          }
+          // notification gate
+          if (m.kind === "notification-gate") {
+            return (
+              <div key={i} className="rounded-md border border-mb-amber/40 bg-mb-amber/10 px-1.5 py-1">
+                <div className="text-[0.85em] text-mb-amber">🔔 You have new notifications</div>
+                <button
+                  onClick={onRevealNotifications}
+                  className="mt-0.5 rounded-full bg-mb-cyan/30 px-1.5 py-0.5 text-[0.8em] font-semibold uppercase tracking-wider text-mb-cyan hover:bg-mb-cyan/50"
+                >
+                  Show me
+                </button>
+              </div>
+            );
+          }
+          return null;
         })}
         {loading && (
           <div className="flex justify-start">
@@ -399,13 +608,35 @@ function ScreenContent({
   );
 }
 
-function ResponsesBlock({ groupId, requests }: { groupId: string; requests: ServiceRequest[] }) {
+function ResponsesBlock({ groupId, requests, navigating, onNavigate, speak }: {
+  groupId: string;
+  requests: ServiceRequest[];
+  navigating?: boolean;
+  onNavigate: (groupId: string, centerName: string) => void;
+  speak: (text: string) => void;
+}) {
   const group = useMemo(() => requests.filter((r) => r.groupId === groupId), [requests, groupId]);
-  if (group.length === 0) return null;
+  const announcedRef = useRef(false);
+
   const responded = group.filter((r) => r.status === "responded" && r.response?.available);
   const fastest = responded.length
     ? responded.reduce((a, b) => ((a.response?.slotDays ?? 99) <= (b.response?.slotDays ?? 99) ? a : b))
     : null;
+
+  const allDone = group.length > 0 && group.every((r) => r.status === "responded");
+
+  // Voice announcement when all centers have replied
+  useEffect(() => {
+    if (allDone && fastest && !announcedRef.current) {
+      announcedRef.current = true;
+      const msg = fastest
+        ? `Good news! Mercedes ${fastest.center} can take you ${fastest.response?.slot}. Want me to take you there?`
+        : `Service centers have responded but no slots are available right now. Try calling them directly.`;
+      speak(msg);
+    }
+  }, [allDone, fastest, speak]);
+
+  if (group.length === 0) return null;
 
   return (
     <div className="rounded-md border border-mb-cyan/30 bg-mb-cyan/5 p-1">
@@ -417,7 +648,7 @@ function ResponsesBlock({ groupId, requests }: { groupId: string; requests: Serv
             <div key={r.id} className={`rounded border px-1 py-0.5 text-[0.8em] ${isFastest ? "border-mb-green/60 bg-mb-green/10" : "border-white/10 bg-black/30"}`}>
               <div className="flex items-center justify-between">
                 <span className="font-semibold">{r.center}</span>
-                {isFastest && <span className="text-[0.85em] text-mb-green">★ Fastest</span>}
+                {isFastest && <span className="text-[0.85em] text-mb-green">★ Best</span>}
               </div>
               {r.status === "pending" && <div className="opacity-70">Awaiting reply…</div>}
               {r.status === "responded" && r.response && (
@@ -434,11 +665,105 @@ function ResponsesBlock({ groupId, requests }: { groupId: string; requests: Serv
           );
         })}
       </div>
-      {fastest && (
-        <div className="mt-0.5 text-[0.75em] text-mb-green">
-          Recommended: Mercedes {fastest.center} — {fastest.response?.slot}
+
+      {/* Best pick summary + navigate CTA */}
+      {fastest && allDone && (
+        <div className="mt-1 rounded border border-mb-green/40 bg-mb-green/10 px-1 py-0.5">
+          <div className="text-[0.75em] text-mb-green">
+            ★ Best: Mercedes {fastest.center} — {fastest.response?.slot}
+          </div>
+          {!navigating ? (
+            <button
+              onClick={() => onNavigate(groupId, fastest.center)}
+              className="mt-0.5 w-full rounded-full bg-mb-cyan/30 px-2 py-0.5 text-[0.8em] font-semibold uppercase tracking-wider text-mb-cyan hover:bg-mb-cyan/50"
+            >
+              🧭 Take me there
+            </button>
+          ) : (
+            <div className="mt-0.5 text-center text-[0.75em] text-mb-green">✓ Navigation started</div>
+          )}
         </div>
       )}
+
+      {/* Waiting for all responses */}
+      {!allDone && (
+        <div className="mt-0.5 text-[0.72em] opacity-50">Waiting for all centers to reply…</div>
+      )}
+    </div>
+  );
+}
+
+function VisitSlotsBlock({
+  visitRequests,
+  onBook,
+}: {
+  visitRequests: ReturnType<typeof useVehicleStore.getState>["visitRequests"];
+  onBook: (center: ServiceCenter, slot: VisitSlot) => void;
+}) {
+  return (
+    <div className="rounded-md border border-mb-cyan/30 bg-mb-cyan/5 p-1 space-y-1">
+      <div className="text-[0.75em] uppercase tracking-wider text-mb-cyan">📍 Service Centers</div>
+      {(["Whitefield", "JP Nagar"] as ServiceCenter[]).map((center) => {
+        const meta = CENTER_META[center];
+        return (
+          <div key={center} className="rounded border border-white/10 bg-black/30 px-1 py-0.5">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-[0.85em] text-mb-silver">{center}</span>
+              <span className="text-[0.7em] text-muted-foreground">{meta.phone}</span>
+            </div>
+            <div className="text-[0.7em] text-muted-foreground mb-0.5">{meta.address}</div>
+            <div className="text-[0.72em] uppercase tracking-wider text-mb-cyan mb-0.5">Available slots</div>
+            <div className="flex flex-wrap gap-0.5">
+              {meta.slots.map((slot) => {
+                const booked = visitRequests.find(
+                  (v) => v.center === center && v.slot.label === slot.label
+                );
+                return (
+                  <button
+                    key={slot.label}
+                    onClick={() => !booked && onBook(center, slot)}
+                    disabled={!!booked}
+                    className={`rounded-full px-1.5 py-0.5 text-[0.75em] uppercase tracking-wide transition-colors
+                      ${booked
+                        ? booked.status === "confirmed"
+                          ? "bg-mb-green/20 text-mb-green border border-mb-green/40 cursor-default"
+                          : "bg-mb-amber/20 text-mb-amber border border-mb-amber/40 cursor-default"
+                        : "bg-mb-cyan/20 text-mb-cyan border border-mb-cyan/30 hover:bg-mb-cyan/40 cursor-pointer"
+                      }`}
+                  >
+                    {booked
+                      ? booked.status === "confirmed" ? `✓ ${slot.label}` : `⏳ ${slot.label}`
+                      : slot.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AgentChatBlock({ center, onSend }: { center: ServiceCenter; onSend: (center: ServiceCenter, msg: string) => void }) {
+  const [val, setVal] = useState("");
+  return (
+    <div className="rounded-md border border-mb-cyan/40 bg-mb-cyan/5 px-1 py-0.5">
+      <div className="text-[0.72em] uppercase tracking-wider text-mb-cyan mb-0.5">💬 Chat with Mercedes {center}</div>
+      <div className="flex gap-0.5">
+        <input
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && val.trim()) { onSend(center, val); setVal(""); } }}
+          placeholder={`Ask ${center} anything…`}
+          className="flex-1 rounded-full border border-white/15 bg-black/40 px-1.5 py-0.5 text-[0.85em] outline-none focus:border-mb-cyan/60"
+        />
+        <button
+          onClick={() => { if (val.trim()) { onSend(center, val); setVal(""); } }}
+          className="rounded-full bg-mb-cyan/25 px-1.5 py-0.5 text-[0.8em] uppercase tracking-wider text-mb-cyan hover:bg-mb-cyan/40 disabled:opacity-40"
+          disabled={!val.trim()}
+        >Ask</button>
+      </div>
     </div>
   );
 }

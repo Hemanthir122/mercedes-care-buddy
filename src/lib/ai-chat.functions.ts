@@ -11,30 +11,52 @@ type Input = {
 export const askMercedes = createServerFn({ method: "POST" })
   .inputValidator((d: Input) => d)
   .handler(async ({ data }) => {
-    const key = process.env.LOVABLE_API_KEY;
-    if (!key) throw new Error("Missing LOVABLE_API_KEY");
-    const gateway = createLovableAiGatewayProvider(key);
+    const gateway = createLovableAiGatewayProvider("");
 
-    const system = `You are the Mercedes-Benz AI Care Companion inside the MBUX infotainment system.
-Your job:
-1. Explain warning lights in simple, friendly language.
-2. Tell the driver if the vehicle is safe to drive.
-3. Explain severity and urgency.
-4. Recommend next steps and approximate time windows.
-5. Suggest visiting a Mercedes service center when appropriate.
+    const system = `
+You are a calm, friendly car assistant.
 
-Be concise (2-4 short sentences). Never use heavy jargon. Sound calm and premium, like a Mercedes concierge.
+You help drivers who are not technical.
 
-Current vehicle telemetry:
-${JSON.stringify(data.vehicle, null, 2)}
+GOAL:
+- Keep the driver calm
+- Give only what they need to do next
+- Never sound technical
+- Never explain like a lesson
 
-Active warnings:
-${JSON.stringify(data.warnings, null, 2)}`;
+STRICT RULES:
+- Maximum 2 sentences only
+- Sentence 1: reassurance
+- Sentence 2: simple action (if needed)
+- No technical words (battery voltage, sensors, diagnostics, etc.)
+- No long explanations
+- No panic language
 
-    const { text } = await generateText({
-      model: gateway("google/gemini-3-flash-preview"),
+STYLE:
+- Very short
+- Friendly
+- Human-like
+- Calm and confident
+
+EXAMPLE OUTPUT:
+"All good, nothing serious. Just try restarting the car while pressing the brake properly."
+
+Car status: ${JSON.stringify(data.vehicle)}
+Warnings: ${JSON.stringify(data.warnings)}
+`;
+
+    const { text: rawText } = await generateText({
+      model: gateway("phi3"),
       system,
-      prompt: data.question,
+      prompt: `Answer in MAX 2 short sentences. No lists. No technical words. No extra advice. Just answer this: ${data.question}`,
     });
+
+    // Trim to max 2 sentences — phi3 tends to ramble
+    const sentences = rawText
+      .replace(/\n+/g, " ")
+      .split(/(?<=[.!?])\s+/)
+      .filter((s) => s.trim().length > 0);
+    const text = sentences.slice(0, 2).join(" ");
+
     return { text };
   });

@@ -1,9 +1,8 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
-export function createLovableAiGatewayProvider(apiKey: string) {
+export function createLovableAiGatewayProvider(_apiKey: string) {
   return createOpenAICompatible({
-    name: "lovable",
-    baseURL: "https://ai.gateway.lovable.dev/v1",
-    headers: { "Lovable-API-Key": apiKey },
+    name: "ollama",
+    baseURL: "http://localhost:11434/v1",
   });
 }
