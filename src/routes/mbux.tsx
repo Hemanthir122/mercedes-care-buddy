@@ -390,6 +390,52 @@ function Cockpit() {
     });
   }
 
+  // ── Wake-word listener: always-on, triggers startVoice on "hey mercedes" ──
+  const wakeRef = useRef<any>(null);
+  useEffect(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+
+    function startWake() {
+      const r = new SR();
+      r.lang = "en-US";
+      r.interimResults = false;
+      r.continuous = true;
+      r.onresult = (e: any) => {
+        const transcript = Array.from(e.results)
+          .map((x: any) => x[0].transcript)
+          .join(" ")
+          .toLowerCase();
+        if (transcript.includes("hey mercedes") || transcript.includes("hey, mercedes")) {
+          r.stop();
+          wakeRef.current = null;
+          startVoice();
+        }
+      };
+      r.onend = () => {
+        // Restart unless voice modal is already open
+        if (!wakeRef.current) return;
+        try { r.start(); } catch {}
+      };
+      r.onerror = () => {
+        // Silently restart on error
+        setTimeout(startWake, 1000);
+      };
+      wakeRef.current = r;
+      try { r.start(); } catch {}
+    }
+
+    startWake();
+    // Delay wake listener start until after welcome speech finishes (~3.5s)
+    const wakeTimer = setTimeout(startWake, 3500);
+    return () => {
+      clearTimeout(wakeTimer);
+      try { wakeRef.current?.stop(); } catch {}
+      wakeRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function speak(text: string) {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
     const u = new SpeechSynthesisUtterance(text);
@@ -399,6 +445,10 @@ function Cockpit() {
   }
 
   function startVoice() {
+    // Pause wake-word listener while modal is active
+    try { wakeRef.current?.stop(); } catch {}
+    wakeRef.current = null;
+
     setVoiceOpen(true);
     setHeard("");
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
