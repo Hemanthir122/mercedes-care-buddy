@@ -1,17 +1,27 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { askMercedes } from "@/lib/ai-chat.functions";
 import cockpitAsset from "@/assets/cockpit.png.asset.json";
-import { useVehicleStore, type Severity } from "@/lib/vehicle-store";
+import {
+  useVehicleStore,
+  SERVICE_CENTERS,
+  COMPONENT_META,
+  type Severity,
+  type HealthKey,
+  type ServiceRequest,
+} from "@/lib/vehicle-store";
 
 export const Route = createFileRoute("/mbux")({
   head: () => ({ meta: [{ title: "MBUX Display" }] }),
   component: Mbux,
 });
 
-type Msg = { role: "user" | "assistant"; text: string };
+type Msg =
+  | { kind: "text"; role: "user" | "assistant"; text: string }
+  | { kind: "prompt"; id: string; componentKey: HealthKey; text: string; resolved?: "yes" | "no" }
+  | { kind: "responses"; groupId: string; componentKey: HealthKey };
 
 function Mbux() {
   const [started, setStarted] = useState(false);
@@ -80,11 +90,11 @@ const sevColor: Record<Severity, string> = {
 };
 
 function Cockpit() {
-  const { health, warnings, model, location } = useVehicleStore();
+  const { health, warnings, model, location, requests, requestService } = useVehicleStore();
   const ask = useServerFn(askMercedes);
 
   const [messages, setMessages] = useState<Msg[]>([
-    { role: "assistant", text: `Welcome. Your ${model} is ready. Tap mic or say "Hey Mercedes".` },
+    { kind: "text", role: "assistant", text: `Welcome. Your ${model} is ready. Tap mic or say "Hey Mercedes".` },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -94,6 +104,9 @@ function Cockpit() {
   const [clock, setClock] = useState("");
   const recogRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Track which components have been auto-notified / prompted to avoid spam
+  const notifyState = useRef<Record<string, { autoSent?: boolean; promptShown?: boolean }>>({});
 
   useEffect(() => {
     const tick = () => setClock(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
@@ -106,9 +119,85 @@ function Cockpit() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
+  // Threshold watcher: <20% auto-send both centers, <30% prompt customer
+  useEffect(() => {
+    const keys = Object.keys(health) as HealthKey[];
+    for (const k of keys) {
+      const v = health[k];
+      const state = (notifyState.current[k] ||= {});
+      if (v >= 30) {
+        // Reset when recovered above prompt threshold
+        state.autoSent = false;
+        state.promptShown = false;
+        continue;
+      }
+      const meta = COMPONENT_META[k];
+      if (v < 20 && !state.autoSent) {
+        state.autoSent = true;
+        state.promptShown = true;
+        const groupId = requestService({
+          componentKey: k,
+          issue: meta.issue,
+          requiredPart: meta.part,
+          health: v,
+          predictedFailureDays: Math.max(1, Math.round(v / 3)),
+          centers: [...SERVICE_CENTERS],
+        });
+        const sysText = `⚠ Critical: ${meta.issue} at ${v}%. I've automatically notified Mercedes ${SERVICE_CENTERS.join(" and ")} service centers.`;
+        setMessages((m) => [
+          ...m,
+          { kind: "text", role: "assistant", text: sysText },
+          { kind: "responses", groupId, componentKey: k },
+        ]);
+        speak(sysText);
+      } else if (v < 30 && !state.promptShown) {
+        state.promptShown = true;
+        const text = `Your ${meta.issue.toLowerCase()} is at ${v}%. Would you like me to connect you with a Mercedes service center?`;
+        setMessages((m) => [
+          ...m,
+          { kind: "prompt", id: crypto.randomUUID(), componentKey: k, text },
+        ]);
+        speak(text);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health.battery, health.brakes, health.wipers, health.ac, health.tires, health.engine]);
+
+  function handlePromptAnswer(promptId: string, componentKey: HealthKey, answer: "yes" | "no") {
+    setMessages((m) =>
+      m.map((msg) =>
+        msg.kind === "prompt" && msg.id === promptId ? { ...msg, resolved: answer } : msg
+      )
+    );
+    if (answer === "no") {
+      const t = "Understood. I'll keep monitoring and alert you if it gets worse.";
+      setMessages((m) => [...m, { kind: "text", role: "assistant", text: t }]);
+      speak(t);
+      return;
+    }
+    const meta = COMPONENT_META[componentKey];
+    const v = health[componentKey];
+    const groupId = requestService({
+      componentKey,
+      issue: meta.issue,
+      requiredPart: meta.part,
+      health: v,
+      predictedFailureDays: Math.max(1, Math.round(v / 3)),
+      centers: [...SERVICE_CENTERS],
+    });
+    const t = `Connecting you to ${SERVICE_CENTERS.join(" and ")}. I'll show their responses here.`;
+    setMessages((m) => [
+      ...m,
+      { kind: "text", role: "user", text: "Yes, please connect me." },
+      { kind: "text", role: "assistant", text: t },
+      { kind: "responses", groupId, componentKey },
+    ]);
+    speak(t);
+  }
+
   async function send(question: string) {
     if (!question.trim() || loading) return;
-    setMessages((m) => [...m, { role: "user", text: question }]);
+    setMessages((m) => [...m, { kind: "text", role: "user", text: question }]);
     setInput("");
     setLoading(true);
     try {
@@ -119,10 +208,10 @@ function Cockpit() {
           warnings: warnings.map((w) => ({ code: w.code, label: w.label, severity: w.severity })),
         },
       });
-      setMessages((m) => [...m, { role: "assistant", text: res.text }]);
+      setMessages((m) => [...m, { kind: "text", role: "assistant", text: res.text }]);
       speak(res.text);
     } catch {
-      setMessages((m) => [...m, { role: "assistant", text: "Sorry, I couldn't reach the AI service right now." }]);
+      setMessages((m) => [...m, { kind: "text", role: "assistant", text: "Sorry, I couldn't reach the AI service right now." }]);
     } finally {
       setLoading(false);
     }
@@ -166,11 +255,8 @@ function Cockpit() {
 
   return (
     <div className="relative mx-auto w-full overflow-hidden rounded-2xl bg-black shadow-2xl" style={{ aspectRatio: "1660 / 933" }}>
-      {/* Cockpit photo */}
       <img src={cockpitAsset.url} alt="Mercedes cockpit" className="absolute inset-0 h-full w-full object-cover" draggable={false} />
 
-      {/* Center infotainment screen overlay */}
-      {/* Image center display: x 38.5–66.5%, y 28.5–44.5% */}
       <div
         className="absolute overflow-hidden bg-[oklch(0.08_0.02_240)] ring-1 ring-mb-cyan/20"
         style={{ left: "38.5%", top: "28.5%", width: "28%", height: "16%", borderRadius: "0.4vw" }}
@@ -179,16 +265,17 @@ function Cockpit() {
           clock={clock}
           warnings={warnings}
           messages={messages}
+          requests={requests}
           loading={loading}
           input={input}
           setInput={setInput}
           send={send}
           startVoice={startVoice}
           scrollRef={scrollRef}
+          onPromptAnswer={handlePromptAnswer}
         />
       </div>
 
-      {/* Voice overlay confined to the screen too */}
       {voiceOpen && (
         <div
           className="absolute z-30 flex flex-col items-center justify-center bg-black/90 backdrop-blur-xl"
@@ -209,21 +296,22 @@ function Cockpit() {
 /* ─────────────────────────── Screen content ─────────────────────────── */
 
 function ScreenContent({
-  clock, warnings, messages, loading, input, setInput, send, startVoice, scrollRef,
+  clock, warnings, messages, requests, loading, input, setInput, send, startVoice, scrollRef, onPromptAnswer,
 }: {
   clock: string;
   warnings: ReturnType<typeof useVehicleStore.getState>["warnings"];
   messages: Msg[];
+  requests: ServiceRequest[];
   loading: boolean;
   input: string;
   setInput: (v: string) => void;
   send: (q: string) => void;
   startVoice: () => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
+  onPromptAnswer: (id: string, k: HealthKey, a: "yes" | "no") => void;
 }) {
   return (
     <div className="flex h-full w-full flex-col p-[0.6%] text-[clamp(7px,0.6vw,11px)]" style={{ fontFamily: "system-ui" }}>
-      {/* Status bar */}
       <div className="flex items-center justify-between border-b border-white/10 px-1 pb-0.5 text-[0.85em] uppercase tracking-widest text-muted-foreground">
         <div className="flex items-center gap-1.5">
           <span className="text-mb-cyan">⌂</span>
@@ -236,7 +324,6 @@ function ScreenContent({
         </div>
       </div>
 
-      {/* Active warnings strip */}
       {warnings.length > 0 && (
         <div className="mt-0.5 flex gap-0.5 overflow-x-auto px-0.5 pb-0.5">
           {warnings.slice(0, 4).map((w) => (
@@ -247,15 +334,40 @@ function ScreenContent({
         </div>
       )}
 
-      {/* Chat */}
       <div ref={scrollRef} className="mt-0.5 flex-1 space-y-0.5 overflow-y-auto px-0.5">
-        {messages.slice(-6).map((m, i) => (
-          <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div className={`max-w-[88%] rounded-md px-1.5 py-0.5 text-[0.95em] leading-tight ${m.role === "user" ? "bg-mb-cyan/25 text-mb-cyan" : "bg-white/10 text-foreground"}`}>
-              {m.text}
-            </div>
-          </div>
-        ))}
+        {messages.slice(-8).map((m, i) => {
+          if (m.kind === "text") {
+            return (
+              <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[88%] rounded-md px-1.5 py-0.5 text-[0.95em] leading-tight ${m.role === "user" ? "bg-mb-cyan/25 text-mb-cyan" : "bg-white/10 text-foreground"}`}>
+                  {m.text}
+                </div>
+              </div>
+            );
+          }
+          if (m.kind === "prompt") {
+            return (
+              <div key={i} className="rounded-md border border-mb-amber/40 bg-mb-amber/10 px-1.5 py-1">
+                <div className="text-[0.9em] text-foreground">{m.text}</div>
+                {!m.resolved && (
+                  <div className="mt-1 flex gap-1">
+                    <button
+                      onClick={() => onPromptAnswer(m.id, m.componentKey, "yes")}
+                      className="rounded-full bg-mb-cyan/30 px-1.5 py-0.5 text-[0.8em] font-semibold uppercase tracking-wider text-mb-cyan"
+                    >Yes, connect</button>
+                    <button
+                      onClick={() => onPromptAnswer(m.id, m.componentKey, "no")}
+                      className="rounded-full border border-white/20 px-1.5 py-0.5 text-[0.8em] uppercase tracking-wider text-muted-foreground"
+                    >Not now</button>
+                  </div>
+                )}
+                {m.resolved && <div className="mt-0.5 text-[0.75em] opacity-60">— {m.resolved === "yes" ? "Connected" : "Dismissed"}</div>}
+              </div>
+            );
+          }
+          // responses
+          return <ResponsesBlock key={i} groupId={m.groupId} requests={requests} />;
+        })}
         {loading && (
           <div className="flex justify-start">
             <div className="rounded-md bg-white/10 px-1.5 py-0.5 text-[0.9em]"><Equalizer /> Thinking…</div>
@@ -263,12 +375,10 @@ function ScreenContent({
         )}
       </div>
 
-      {/* Input row */}
       <div className="mt-0.5 flex items-center gap-0.5 border-t border-white/10 px-0.5 pt-0.5">
         <button
           onClick={startVoice}
           className="rounded-full border border-mb-cyan/50 bg-mb-cyan/15 px-1.5 py-0.5 text-[0.85em] uppercase tracking-wider text-mb-cyan hover:bg-mb-cyan/25"
-          title="Hey Mercedes"
         >
           🎙 Voice
         </button>
@@ -283,6 +393,50 @@ function ScreenContent({
           Send
         </button>
       </div>
+    </div>
+  );
+}
+
+function ResponsesBlock({ groupId, requests }: { groupId: string; requests: ServiceRequest[] }) {
+  const group = useMemo(() => requests.filter((r) => r.groupId === groupId), [requests, groupId]);
+  if (group.length === 0) return null;
+  const responded = group.filter((r) => r.status === "responded" && r.response?.available);
+  const fastest = responded.length
+    ? responded.reduce((a, b) => ((a.response?.slotDays ?? 99) <= (b.response?.slotDays ?? 99) ? a : b))
+    : null;
+
+  return (
+    <div className="rounded-md border border-mb-cyan/30 bg-mb-cyan/5 p-1">
+      <div className="text-[0.75em] uppercase tracking-wider text-mb-cyan">Service center responses</div>
+      <div className="mt-0.5 grid grid-cols-2 gap-0.5">
+        {group.map((r) => {
+          const isFastest = fastest && r.id === fastest.id;
+          return (
+            <div key={r.id} className={`rounded border px-1 py-0.5 text-[0.8em] ${isFastest ? "border-mb-green/60 bg-mb-green/10" : "border-white/10 bg-black/30"}`}>
+              <div className="flex items-center justify-between">
+                <span className="font-semibold">{r.center}</span>
+                {isFastest && <span className="text-[0.85em] text-mb-green">★ Fastest</span>}
+              </div>
+              {r.status === "pending" && <div className="opacity-70">Awaiting reply…</div>}
+              {r.status === "responded" && r.response && (
+                r.response.available ? (
+                  <div className="leading-tight">
+                    <div>✓ {r.response.slot}</div>
+                    <div className="opacity-70">{r.response.repairTime}</div>
+                  </div>
+                ) : (
+                  <div className="text-mb-red">Unavailable</div>
+                )
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {fastest && (
+        <div className="mt-0.5 text-[0.75em] text-mb-green">
+          Recommended: Mercedes {fastest.center} — {fastest.response?.slot}
+        </div>
+      )}
     </div>
   );
 }

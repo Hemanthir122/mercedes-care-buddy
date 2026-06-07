@@ -27,11 +27,17 @@ export type Warning = {
   at: number;
 };
 
+export type ServiceCenter = "Whitefield" | "JP Nagar";
+export const SERVICE_CENTERS: ServiceCenter[] = ["Whitefield", "JP Nagar"];
+
 export type ServiceRequest = {
   id: string;
+  groupId: string;
+  center: ServiceCenter;
   customer: string;
   vehicle: string;
   issue: string;
+  componentKey: string;
   health: number;
   predictedFailureDays: number;
   requiredPart: string;
@@ -40,31 +46,35 @@ export type ServiceRequest = {
   response?: {
     available: boolean;
     repairTime: string;
+    slotDays: number; // days from now
     slot: string;
-    center: string;
+    center: ServiceCenter;
   };
 };
+
+export type HealthKey = "battery" | "brakes" | "wipers" | "ac" | "tires" | "engine";
 
 export type VehicleState = {
   vehicleId: string;
   model: string;
+  customer: string;
   location: string;
-  health: {
-    battery: number;
-    brakes: number;
-    wipers: number;
-    ac: number;
-    tires: number;
-    engine: number;
-  };
+  health: Record<HealthKey, number>;
   warnings: Warning[];
   requests: ServiceRequest[];
-  inventory: Record<string, number>;
-  setHealth: (k: keyof VehicleState["health"], v: number) => void;
+  centersInventory: Record<ServiceCenter, Record<string, number>>;
+  setHealth: (k: HealthKey, v: number) => void;
   triggerWarning: (code: WarningCode) => void;
   clearWarning: (code: WarningCode) => void;
   clearAllWarnings: () => void;
-  addRequest: (r: Omit<ServiceRequest, "id" | "createdAt" | "status">) => void;
+  requestService: (args: {
+    componentKey: string;
+    issue: string;
+    requiredPart: string;
+    health: number;
+    predictedFailureDays: number;
+    centers: ServiceCenter[];
+  }) => string; // returns groupId
   respondRequest: (id: string, r: ServiceRequest["response"]) => void;
   reset: () => void;
 };
@@ -87,16 +97,29 @@ export const WARNING_META: Record<WarningCode, Omit<Warning, "code" | "at">> = {
   WIPER_SYSTEM_FAULT: { label: "Wiper System Fault", severity: "medium", description: "Wiper motor degradation detected." },
 };
 
+export const COMPONENT_META: Record<HealthKey, { issue: string; part: string; warning: WarningCode }> = {
+  battery: { issue: "Battery Warning", part: "Battery", warning: "BATTERY_WARNING" },
+  brakes: { issue: "Brake Pad Wear", part: "Brake Pads", warning: "BRAKE_PAD_WEAR" },
+  wipers: { issue: "Wiper System Fault", part: "Wiper Motor", warning: "WIPER_SYSTEM_FAULT" },
+  ac: { issue: "AC System Fault", part: "AC Compressor", warning: "CHECK_ENGINE" },
+  tires: { issue: "Low Tire Pressure", part: "Tire", warning: "LOW_TIRE_PRESSURE" },
+  engine: { issue: "Check Engine", part: "Coolant", warning: "CHECK_ENGINE" },
+};
+
 const CHANNEL = "mbux-state";
 
-const initial = {
+const initial: Omit<VehicleState, "setHealth" | "triggerWarning" | "clearWarning" | "clearAllWarnings" | "requestService" | "respondRequest" | "reset"> = {
   vehicleId: "MB001",
   model: "GLC 300",
+  customer: "Mr. Sharma",
   location: "Bangalore",
   health: { battery: 95, brakes: 82, wipers: 65, ac: 91, tires: 88, engine: 96 },
-  warnings: [] as Warning[],
-  requests: [] as ServiceRequest[],
-  inventory: { "Brake Pads": 12, "Battery": 8, "Wiper Motor": 4, "AC Compressor": 3, "Tire": 20, "Coolant": 15 },
+  warnings: [],
+  requests: [],
+  centersInventory: {
+    Whitefield: { "Brake Pads": 12, "Battery": 8, "Wiper Motor": 4, "AC Compressor": 3, "Tire": 20, "Coolant": 15 },
+    "JP Nagar": { "Brake Pads": 6, "Battery": 14, "Wiper Motor": 9, "AC Compressor": 1, "Tire": 12, "Coolant": 22 },
+  },
 };
 
 function load() {
@@ -131,10 +154,26 @@ export const useVehicleStore = create<VehicleState>((set, get) => ({
     set({ warnings: [] });
     persist(get());
   },
-  addRequest: (r) => {
-    const req: ServiceRequest = { ...r, id: crypto.randomUUID(), createdAt: Date.now(), status: "pending" };
-    set((s) => ({ requests: [req, ...s.requests] }));
+  requestService: ({ componentKey, issue, requiredPart, health, predictedFailureDays, centers }) => {
+    const groupId = crypto.randomUUID();
+    const s = get();
+    const newReqs: ServiceRequest[] = centers.map((center) => ({
+      id: crypto.randomUUID(),
+      groupId,
+      center,
+      customer: s.customer,
+      vehicle: `${s.model} · ${s.vehicleId}`,
+      issue,
+      componentKey,
+      health,
+      predictedFailureDays,
+      requiredPart,
+      status: "pending",
+      createdAt: Date.now(),
+    }));
+    set((st) => ({ requests: [...newReqs, ...st.requests] }));
     persist(get());
+    return groupId;
   },
   respondRequest: (id, response) => {
     set((s) => ({
@@ -150,7 +189,7 @@ export const useVehicleStore = create<VehicleState>((set, get) => ({
 
 function autoTriggerByHealth(get: () => VehicleState, set: (p: Partial<VehicleState>) => void) {
   const s = get();
-  const triggers: Array<[keyof VehicleState["health"], WarningCode]> = [
+  const triggers: Array<[HealthKey, WarningCode]> = [
     ["brakes", "BRAKE_PAD_WEAR"],
     ["wipers", "WIPER_SYSTEM_FAULT"],
     ["battery", "BATTERY_WARNING"],
@@ -174,11 +213,12 @@ function persist(state: VehicleState) {
   const data = {
     vehicleId: state.vehicleId,
     model: state.model,
+    customer: state.customer,
     location: state.location,
     health: state.health,
     warnings: state.warnings,
     requests: state.requests,
-    inventory: state.inventory,
+    centersInventory: state.centersInventory,
   };
   try {
     localStorage.setItem(CHANNEL, JSON.stringify(data));
