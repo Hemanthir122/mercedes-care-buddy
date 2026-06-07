@@ -46,14 +46,6 @@ function NavLink({ to, active, children }: { to: "/demo" | "/mbux"; active: bool
     >{children}</Link>
   );
 }
-        <div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex">
-          <span className="inline-block h-2 w-2 rounded-full bg-mb-green mb-pulse" />
-          Live sync across tabs
-        </div>
-      </div>
-    </header>
-  );
-}
 
 export function MercedesStar({ className = "" }: { className?: string }) {
   return (
