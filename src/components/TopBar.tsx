@@ -1,11 +1,6 @@
 import { Link } from "@tanstack/react-router";
 
 export function TopBar({ active }: { active: "demo" | "mbux" | "service" }) {
-  const items = [
-    { key: "demo", to: "/demo", label: "Demo Control" },
-    { key: "mbux", to: "/mbux", label: "MBUX Display" },
-    { key: "service", to: "/service", label: "Service Portal" },
-  ] as const;
   return (
     <header className="sticky top-0 z-40 mb-glass">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3">
@@ -17,20 +12,40 @@ export function TopBar({ active }: { active: "demo" | "mbux" | "service" }) {
           </div>
         </Link>
         <nav className="flex items-center gap-1 rounded-full border border-border bg-surface p-1">
-          {items.map((it) => (
-            <Link
-              key={it.key}
-              to={it.to}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${
-                active === it.key
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {it.label}
-            </Link>
-          ))}
+          <NavLink to="/demo" active={active === "demo"}>Demo Control</NavLink>
+          <NavLink to="/mbux" active={active === "mbux"}>MBUX Display</NavLink>
+          <Link
+            to="/service"
+            search={{ center: "Whitefield" }}
+            className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${
+              active === "service" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >Service · Whitefield</Link>
+          <Link
+            to="/service"
+            search={{ center: "JP Nagar" }}
+            className="rounded-full px-4 py-1.5 text-xs font-medium text-muted-foreground transition hover:text-foreground"
+          >Service · JP Nagar</Link>
         </nav>
+        <div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex">
+          <span className="inline-block h-2 w-2 rounded-full bg-mb-green mb-pulse" />
+          Live sync across tabs
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function NavLink({ to, active, children }: { to: "/demo" | "/mbux"; active: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className={`rounded-full px-4 py-1.5 text-xs font-medium transition ${
+        active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+      }`}
+    >{children}</Link>
+  );
+}
         <div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex">
           <span className="inline-block h-2 w-2 rounded-full bg-mb-green mb-pulse" />
           Live sync across tabs
