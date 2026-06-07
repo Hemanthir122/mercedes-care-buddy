@@ -17,7 +17,7 @@ export const Route = createFileRoute("/service")({
 });
 
 function ServicePortal() {
-  const { center } = Route.useSearch();
+  const { center } = Route.useSearch() as Search;
   const { requests, centersInventory, respondRequest } = useVehicleStore();
   const inventory = (centersInventory[center] ?? {}) as Record<string, number>;
   const scoped = requests.filter((r) => r.center === center);
