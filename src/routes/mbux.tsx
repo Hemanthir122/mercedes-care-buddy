@@ -1,8 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TopBar } from "@/components/TopBar";
-import { askMercedes } from "@/lib/ai-chat.functions";
+import { VapiVoiceModal, useVapi, useVapiWakeWord } from "@/components/VapiVoiceModal";
 import cockpitAsset from "@/assets/cockpit.png.asset.json";
 import cockpitLocal from "@/assets/cockpit.png";
 import {
@@ -98,7 +97,6 @@ const sevColor: Record<Severity, string> = {
 
 function Cockpit() {
   const { health, warnings, model, location, requests, requestService, centersInventory, visitRequests, requestVisit } = useVehicleStore();
-  const ask = useServerFn(askMercedes);
 
   const hasNotification = warnings.length > 0 || Object.values(health).some((v) => v < 30);
 
@@ -114,13 +112,19 @@ function Cockpit() {
   );
   const [notificationsRevealed, setNotificationsRevealed] = useState(false);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [heard, setHeard] = useState("");
+  const [vapiFirstMsg, setVapiFirstMsg] = useState<string | undefined>(undefined);
   const [clock, setClock] = useState("");
-  const recogRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Vapi handle — used for ALL speech (say) and interactive calls
+  const vapi = useVapi(
+    { health: health as Record<string, number>, warnings: warnings.map((w) => ({ label: w.label, severity: w.severity })) },
+    centersInventory as Record<string, Record<string, number>>,
+    "Hemanth",
+    () => setVoiceOpen(false),
+    (transcript) => { setVoiceOpen(false); send(transcript); }
+  );
 
   // Track which components have been auto-notified / prompted to avoid spam
   const notifyState = useRef<Record<string, { autoSent?: boolean; promptShown?: boolean }>>({});
@@ -132,14 +136,12 @@ function Cockpit() {
     return () => clearInterval(id);
   }, []);
 
-  // Speak welcome on first mount — only mention notification if there's actually something
+  // Welcome via Vapi TTS on first mount
   useEffect(() => {
     const { health: h, warnings: w } = useVehicleStore.getState();
     const hasIssue = w.length > 0 || Object.values(h).some((v) => v < 30);
-    const t1 = setTimeout(() => speak("Welcome back, Hemanth!"), 800);
-    const t2 = hasIssue
-      ? setTimeout(() => speak("You have a notification."), 2200)
-      : null;
+    const t1 = setTimeout(() => vapi.say("Welcome back, Hemanth!"), 1000);
+    const t2 = hasIssue ? setTimeout(() => vapi.say("You have a notification."), 3000) : null;
     return () => { clearTimeout(t1); if (t2) clearTimeout(t2); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -177,12 +179,8 @@ function Cockpit() {
           { kind: "text", role: "assistant", text: sysText },
           { kind: "responses", groupId, componentKey: k },
         ]);
-        // Auto-open voice modal to announce the critical alert
-        setVoiceOpen(true);
-        setListening(false);
-        setHeard(sysText);
-        speak(sysText);
-        setTimeout(() => setVoiceOpen(false), 4500);
+        // Open Vapi modal to announce the critical alert
+        vapi.say(sysText);
 
         // Auto-simulate service center responses so MBUX always gets a reply
         const { requests: reqs, respondRequest, centersInventory: inv } = useVehicleStore.getState();
@@ -207,7 +205,7 @@ function Cockpit() {
         state.promptShown = true;
         const text = `Heads up — your ${meta.issue.toLowerCase()} needs attention soon. Keep an eye on it.`;
         setMessages((m) => [...m, { kind: "text", role: "assistant", text }]);
-        speak(text);
+        vapi.say(text);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -244,7 +242,7 @@ function Cockpit() {
       { kind: "text", role: "assistant", text: partMsg },
       { kind: "agent-chat", center, groupId },
     ]);
-    speak(partMsg);
+    vapi.say(partMsg);
   }
 
   function handleAgentMessage(center: ServiceCenter, userMsg: string) {
@@ -282,7 +280,7 @@ function Cockpit() {
 
       const fullReply = `Mercedes ${center}: ${reply}`;
       setMessages((m) => [...m, { kind: "text", role: "assistant", text: fullReply }]);
-      speak(fullReply);
+      vapi.say(fullReply);
     }, 800);
   }
 
@@ -295,7 +293,7 @@ function Cockpit() {
     if (answer === "no") {
       const t = "Understood. I'll keep monitoring and alert you if it gets worse.";
       setMessages((m) => [...m, { kind: "text", role: "assistant", text: t }]);
-      speak(t);
+      vapi.say(t);
       return;
     }
     const meta = COMPONENT_META[componentKey];
@@ -315,47 +313,34 @@ function Cockpit() {
       { kind: "text", role: "assistant", text: t },
       { kind: "responses", groupId, componentKey },
     ]);
-    speak(t);
+    vapi.say(t);
   }
 
   const VISIT_INTENT = /service cent|list cent|when.*free|available slot|book.*visit|visit.*center|show.*center|centers/i;
+  const NOTIF_INTENT = /notif|warn|check|status|what.*up|what.*wrong|show|tell me|any issue|any problem|health|diagnos/i;
 
-  async function send(question: string) {
-    if (!question.trim() || loading) return;
+  function send(question: string) {
+    if (!question.trim()) return;
     setMessages((m) => [...m, { kind: "text", role: "user", text: question }]);
     setInput("");
 
-    // Intercept visit / list centers intent — no AI needed
+    // Intercept visit / list centers intent
     if (VISIT_INTENT.test(question)) {
       const t = "Here are our service centers. Pick a slot and I'll notify them right away.";
       setMessages((m) => [...m, { kind: "text", role: "assistant", text: t }, { kind: "visit-slots" }]);
-      speak(t);
+      vapi.say(t);
       return;
     }
 
-    // Intercept "show notification" intent
-    const NOTIF_INTENT = /notif|what.*up|what.*wrong|show|tell me|any issue|any problem/i;
-    if (!notificationsRevealed && NOTIF_INTENT.test(question)) {
+    // Intercept notification / warning / status intent
+    if (NOTIF_INTENT.test(question)) {
       handleRevealNotifications();
       return;
     }
 
-    setLoading(true);
-    try {
-      const res = await ask({
-        data: {
-          question,
-          vehicle: { model, location, health },
-          warnings: warnings.map((w) => ({ code: w.code, label: w.label, severity: w.severity })),
-        },
-      });
-      setMessages((m) => [...m, { kind: "text", role: "assistant", text: res.text }]);
-      speak(res.text);
-    } catch {
-      setMessages((m) => [...m, { kind: "text", role: "assistant", text: "Sorry, I couldn't reach the AI service right now." }]);
-    } finally {
-      setLoading(false);
-    }
+    // Any other question → open Vapi modal directly (same as wake word)
+    setVapiFirstMsg(question);
+    setVoiceOpen(true);
   }
 
   function handleBookVisit(center: ServiceCenter, slot: VisitSlot) {
@@ -363,7 +348,7 @@ function Cockpit() {
     const id = requestVisit(center, slot);
     const pending = `Booking ${slot.label} at Mercedes ${center}… waiting for their confirmation.`;
     setMessages((m) => [...m, { kind: "text", role: "assistant", text: pending }]);
-    speak(pending);
+    vapi.say(pending);
 
     // Watch for center confirmation
     const unsub = useVehicleStore.subscribe((state) => {
@@ -374,7 +359,7 @@ function Cockpit() {
         // 1. Tell the customer
         const confirmedMsg = `Mercedes ${center} confirmed your visit for ${slot.label}. You're all set!`;
         setMessages((m) => [...m, { kind: "text", role: "assistant", text: confirmedMsg }]);
-        speak(confirmedMsg);
+        vapi.say(confirmedMsg);
 
         // 2. Show what was sent to the center (outbound notification)
         const sentToCenter = `[To Mercedes ${center}] ${customer} will visit on ${slot.label} with ${model} (${vehicleId}). Please keep the slot reserved.`;
@@ -384,100 +369,19 @@ function Cockpit() {
         setTimeout(() => {
           const centerReply = `Mercedes ${center}: Got it! Slot reserved for ${customer} on ${slot.label}. We'll have a service advisor ready. See you then!`;
           setMessages((m) => [...m, { kind: "text", role: "assistant", text: centerReply }]);
-          speak(centerReply);
+          vapi.say(centerReply);
         }, 1200);
       }
     });
   }
 
-  // ── Wake-word listener: always-on, triggers startVoice on "hey mercedes" ──
-  const wakeRef = useRef<any>(null);
-  useEffect(() => {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
+  // Wake word triggers Vapi call
+  useVapiWakeWord(() => { setVapiFirstMsg(undefined); setVoiceOpen(true); }, 4000);
 
-    function startWake() {
-      const r = new SR();
-      r.lang = "en-US";
-      r.interimResults = false;
-      r.continuous = true;
-      r.onresult = (e: any) => {
-        const transcript = Array.from(e.results)
-          .map((x: any) => x[0].transcript)
-          .join(" ")
-          .toLowerCase();
-        if (transcript.includes("hey mercedes") || transcript.includes("hey, mercedes")) {
-          r.stop();
-          wakeRef.current = null;
-          startVoice();
-        }
-      };
-      r.onend = () => {
-        // Restart unless voice modal is already open
-        if (!wakeRef.current) return;
-        try { r.start(); } catch {}
-      };
-      r.onerror = () => {
-        // Silently restart on error
-        setTimeout(startWake, 1000);
-      };
-      wakeRef.current = r;
-      try { r.start(); } catch {}
-    }
-
-    startWake();
-    // Delay wake listener start until after welcome speech finishes (~3.5s)
-    const wakeTimer = setTimeout(startWake, 3500);
-    return () => {
-      clearTimeout(wakeTimer);
-      try { wakeRef.current?.stop(); } catch {}
-      wakeRef.current = null;
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function speak(text: string) {
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1; u.pitch = 1; u.volume = 0.9;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(u);
-  }
-
-  function startVoice() {
-    // Pause wake-word listener while modal is active
-    try { wakeRef.current?.stop(); } catch {}
-    wakeRef.current = null;
-
-    setVoiceOpen(true);
-    setHeard("");
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { setHeard("Voice not supported. Type instead."); return; }
-    const r = new SR();
-    r.lang = "en-US"; r.interimResults = true; r.continuous = false;
-    r.onstart = () => setListening(true);
-    r.onresult = (e: any) => {
-      const t = Array.from(e.results).map((x: any) => x[0].transcript).join("");
-      setHeard(t);
-      if (e.results[e.results.length - 1].isFinal) {
-        setListening(false);
-        setTimeout(() => { setVoiceOpen(false); send(t); }, 600);
-      }
-    };
-    r.onerror = () => { setListening(false); setHeard("Didn't catch that."); };
-    r.onend = () => setListening(false);
-    recogRef.current = r;
-    try { r.start(); } catch {}
-  }
-
-  function stopVoice() {
-    try { recogRef.current?.stop(); } catch {}
-    setListening(false);
-    setVoiceOpen(false);
-  }
+  function startVoice() { setVapiFirstMsg(undefined); setVoiceOpen(true); }
+  function stopVoice() { vapi.stopCall(); setVoiceOpen(false); }
 
   return (
-    // Fullscreen cockpit container — uses local `src/assets/cockpit.png` when available.
     <div className="relative w-screen h-screen overflow-hidden bg-black shadow-2xl" style={{ borderRadius: 0 }}>
       <img src={cockpitLocal || cockpitAsset.url} alt="Mercedes cockpit" className="absolute inset-0 h-full w-full object-cover" draggable={false} />
 
@@ -491,33 +395,27 @@ function Cockpit() {
           messages={messages}
           requests={requests}
           visitRequests={visitRequests}
-          loading={loading}
+          loading={false}
           input={input}
           setInput={setInput}
           send={send}
-          startVoice={startVoice}
           scrollRef={scrollRef}
           onPromptAnswer={handlePromptAnswer}
           onNavigate={handleNavigate}
-          speak={speak}
           onAgentMessage={handleAgentMessage}
           onBookVisit={handleBookVisit}
           onRevealNotifications={handleRevealNotifications}
+          onSay={vapi.say}
         />
       </div>
 
       {voiceOpen && (
-        <div
-          className="absolute z-30 flex flex-col items-center justify-center bg-black/90 backdrop-blur-xl"
-          style={{ left: "38.5%", top: "28.5%", width: "28%", height: "16%", borderRadius: "0.4vw" }}
-        >
-          <div className="text-[clamp(8px,0.7vw,12px)] uppercase tracking-[0.4em] text-mb-cyan">Hey Mercedes</div>
-          <div className="mt-2"><VoiceOrb active={listening} /></div>
-          <div className="mt-2 max-w-[90%] px-2 text-center text-[clamp(9px,0.8vw,14px)] font-light text-mb-silver line-clamp-2">
-            {heard || (listening ? "Listening…" : "Say something")}
-          </div>
-          <button onClick={stopVoice} className="mt-2 rounded-full border border-white/20 px-3 py-0.5 text-[clamp(7px,0.55vw,10px)] uppercase tracking-wider text-muted-foreground hover:text-foreground">Cancel</button>
-        </div>
+        <VapiVoiceModal
+          open={voiceOpen}
+          onClose={stopVoice}
+          vapiHandle={vapi}
+          firstMessage={vapiFirstMsg}
+        />
       )}
     </div>
   );
@@ -526,7 +424,7 @@ function Cockpit() {
 /* ─────────────────────────── Screen content ─────────────────────────── */
 
 function ScreenContent({
-  clock, warnings, messages, requests, visitRequests, loading, input, setInput, send, startVoice, scrollRef, onPromptAnswer, onNavigate, speak, onAgentMessage, onBookVisit, onRevealNotifications,
+  clock, warnings, messages, requests, visitRequests, loading, input, setInput, send, scrollRef, onPromptAnswer, onNavigate, onAgentMessage, onBookVisit, onRevealNotifications, onSay,
 }: {
   clock: string;
   warnings: ReturnType<typeof useVehicleStore.getState>["warnings"];
@@ -537,14 +435,13 @@ function ScreenContent({
   input: string;
   setInput: (v: string) => void;
   send: (q: string) => void;
-  startVoice: () => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   onPromptAnswer: (id: string, k: HealthKey, a: "yes" | "no") => void;
   onNavigate: (groupId: string, centerName: string) => void;
-  speak: (text: string) => void;
   onAgentMessage: (center: ServiceCenter, msg: string) => void;
   onBookVisit: (center: ServiceCenter, slot: VisitSlot) => void;
   onRevealNotifications: () => void;
+  onSay: (text: string) => void;
 }) {
   return (
     <div className="flex h-full w-full flex-col p-[0.6%] text-[clamp(7px,0.6vw,11px)]" style={{ fontFamily: "system-ui" }}>
@@ -603,7 +500,7 @@ function ScreenContent({
           }
           // responses
           if (m.kind === "responses") {
-            return <ResponsesBlock key={i} groupId={m.groupId} requests={requests} navigating={m.navigating} onNavigate={onNavigate} speak={speak} />;
+            return <ResponsesBlock key={i} groupId={m.groupId} requests={requests} navigating={m.navigating} onNavigate={onNavigate} onSay={onSay} />;
           }
           // agent-chat — inline in correct position
           if (m.kind === "agent-chat") {
@@ -637,12 +534,6 @@ function ScreenContent({
       </div>
 
       <div className="mt-0.5 flex items-center gap-0.5 border-t border-white/10 px-0.5 pt-0.5">
-        <button
-          onClick={startVoice}
-          className="rounded-full border border-mb-cyan/50 bg-mb-cyan/15 px-1.5 py-0.5 text-[0.85em] uppercase tracking-wider text-mb-cyan hover:bg-mb-cyan/25"
-        >
-          🎙 Voice
-        </button>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -650,7 +541,7 @@ function ScreenContent({
           placeholder="Ask Mercedes…"
           className="flex-1 rounded-full border border-white/15 bg-black/40 px-1.5 py-0.5 text-[0.9em] outline-none focus:border-mb-cyan/60"
         />
-        <button onClick={() => send(input)} disabled={loading || !input.trim()} className="rounded-full bg-mb-cyan/25 px-1.5 py-0.5 text-[0.85em] uppercase tracking-wider text-mb-cyan disabled:opacity-40">
+        <button onClick={() => send(input)} disabled={!input.trim()} className="rounded-full bg-mb-cyan/25 px-1.5 py-0.5 text-[0.85em] uppercase tracking-wider text-mb-cyan disabled:opacity-40">
           Send
         </button>
       </div>
@@ -658,12 +549,12 @@ function ScreenContent({
   );
 }
 
-function ResponsesBlock({ groupId, requests, navigating, onNavigate, speak }: {
+function ResponsesBlock({ groupId, requests, navigating, onNavigate, onSay }: {
   groupId: string;
   requests: ServiceRequest[];
   navigating?: boolean;
   onNavigate: (groupId: string, centerName: string) => void;
-  speak: (text: string) => void;
+  onSay: (text: string) => void;
 }) {
   const group = useMemo(() => requests.filter((r) => r.groupId === groupId), [requests, groupId]);
   const announcedRef = useRef(false);
@@ -675,16 +566,15 @@ function ResponsesBlock({ groupId, requests, navigating, onNavigate, speak }: {
 
   const allDone = group.length > 0 && group.every((r) => r.status === "responded");
 
-  // Voice announcement when all centers have replied
   useEffect(() => {
     if (allDone && fastest && !announcedRef.current) {
       announcedRef.current = true;
       const msg = fastest
         ? `Good news! Mercedes ${fastest.center} can take you ${fastest.response?.slot}. Want me to take you there?`
         : `Service centers have responded but no slots are available right now. Try calling them directly.`;
-      speak(msg);
+      onSay(msg);
     }
-  }, [allDone, fastest, speak]);
+  }, [allDone, fastest, onSay]);
 
   if (group.length === 0) return null;
 

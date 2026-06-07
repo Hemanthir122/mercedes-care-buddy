@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { TopBar } from "@/components/TopBar";
 import { Button } from "@/components/ui/button";
-import { useVehicleStore, SERVICE_CENTERS, type ServiceCenter, type ServiceRequest } from "@/lib/vehicle-store";
+import { useVehicleStore, SERVICE_CENTERS, type ServiceCenter, type ServiceRequest, type VisitRequest } from "@/lib/vehicle-store";
 
 type Search = { center: ServiceCenter };
 
@@ -18,11 +18,15 @@ export const Route = createFileRoute("/service")({
 
 function ServicePortal() {
   const { center } = Route.useSearch() as Search;
-  const { requests, centersInventory, respondRequest } = useVehicleStore();
+  const { requests, visitRequests, centersInventory, respondRequest, respondVisit } = useVehicleStore();
   const inventory = (centersInventory[center] ?? {}) as Record<string, number>;
   const scoped = requests.filter((r) => r.center === center);
   const pending = scoped.filter((r) => r.status === "pending");
   const handled = scoped.filter((r) => r.status === "responded");
+
+  const scopedVisits = visitRequests.filter((v) => v.center === center);
+  const pendingVisits = scopedVisits.filter((v) => v.status === "pending");
+  const handledVisits = scopedVisits.filter((v) => v.status !== "pending");
 
   return (
     <div>
@@ -54,6 +58,34 @@ function ServicePortal() {
 
         <div className="mt-8 grid gap-6 lg:grid-cols-[2fr_1fr]">
           <section className="space-y-4">
+
+            {/* ── Visit Bookings ── */}
+            {(pendingVisits.length > 0 || handledVisits.length > 0) && (
+              <div className="space-y-3">
+                <div className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+                  Visit Bookings · {pendingVisits.length} pending
+                </div>
+                {pendingVisits.map((v) => (
+                  <VisitCard key={v.id} visit={v} onRespond={respondVisit} />
+                ))}
+                {handledVisits.map((v) => (
+                  <div key={v.id} className="mb-glass rounded-2xl p-4 opacity-70">
+                    <div className="flex items-center justify-between text-sm">
+                      <div>
+                        <div className="font-semibold">{v.vehicle} · {v.customer}</div>
+                        <div className="text-xs text-muted-foreground">{v.slot.label}</div>
+                      </div>
+                      <div className={`text-sm font-medium ${v.status === "confirmed" ? "text-mb-green" : "text-mb-red"}`}>
+                        {v.status === "confirmed" ? "✓ Confirmed" : "✗ Declined"}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <div className="border-t border-border" />
+              </div>
+            )}
+
+            {/* ── Diagnostic / Part Requests ── */}
             <div className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
               Incoming Requests · {pending.length}
             </div>
@@ -194,6 +226,43 @@ function RequestCard({
           onClick={() => onRespond(r.id, { available: true, repairTime, slotDays, slot: slotLabel, center: r.center })}
         >
           Confirm & notify customer
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function VisitCard({
+  visit: v,
+  onRespond,
+}: {
+  visit: VisitRequest;
+  onRespond: (id: string, status: "confirmed" | "declined") => void;
+}) {
+  return (
+    <div className="mb-glass rounded-2xl border border-mb-cyan/30 p-5">
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="text-[10px] uppercase tracking-[0.3em] text-mb-cyan">Visit Booking · {v.center}</div>
+          <div className="mt-1 text-lg font-semibold">{v.vehicle} · {v.customer}</div>
+        </div>
+        <div className="rounded-full border border-mb-amber/40 bg-mb-amber/10 px-3 py-1 text-xs font-medium text-mb-amber">
+          Awaiting confirmation
+        </div>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <Stat label="Requested slot" value={v.slot.label} />
+        <Stat label="Time" value={v.slot.time} />
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button
+          variant="secondary"
+          onClick={() => onRespond(v.id, "declined")}
+        >
+          Decline
+        </Button>
+        <Button onClick={() => onRespond(v.id, "confirmed")}>
+          Confirm visit
         </Button>
       </div>
     </div>

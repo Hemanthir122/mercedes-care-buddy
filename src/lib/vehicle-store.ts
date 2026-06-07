@@ -233,15 +233,7 @@ export const useVehicleStore = create<VehicleState>((set, get) => ({
     };
     set((st) => ({ visitRequests: [vr, ...st.visitRequests] }));
     persist(get());
-    // Simulate center agent confirming after 1.5s
-    setTimeout(() => {
-      set((st) => ({
-        visitRequests: st.visitRequests.map((v) =>
-          v.id === id ? { ...v, status: "confirmed", confirmedAt: Date.now() } : v
-        ),
-      }));
-      persist(useVehicleStore.getState());
-    }, 1500);
+    // No auto-confirm — service center portal must confirm/decline
     return id;
   },
   respondVisit: (id, status) => {
